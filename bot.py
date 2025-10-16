@@ -60,12 +60,21 @@ async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         album_id = message.media_group_id
         
+        # Очищаем старые альбомы (старше 1 часа) перед проверкой
+        current_time = time.time()
+        albums_to_remove = []
+        for aid, data in list(temp_albums.items()):
+            if current_time - data.get('timestamp', 0) > 3600:
+                albums_to_remove.append(aid)
+        for aid in albums_to_remove:
+            del temp_albums[aid]
+        
         if album_id not in temp_albums:
             temp_albums[album_id] = {
                 'count': 1,
                 'first_message_id': message.message_id,
                 'warning_sent': False,
-                'timestamp': time.time()
+                'timestamp': current_time
             }
         else:
             temp_albums[album_id]['count'] += 1
@@ -121,19 +130,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# Функция для очистки старых альбомов (опционально)
-async def cleanup_albums(context: ContextTypes.DEFAULT_TYPE):
-    """Очищает старые записи об альбомах"""
-    current_time = time.time()
-    albums_to_remove = []
-    
-    for album_id, data in temp_albums.items():
-        if current_time - data['timestamp'] > 3600:  # Удаляем старше 1 часа
-            albums_to_remove.append(album_id)
-    
-    for album_id in albums_to_remove:
-        del temp_albums[album_id]
-
 def main():
     if not TOKEN:
         raise RuntimeError("❌ Переменная BOT_TOKEN не задана! Добавь её в Environment Variables на Render.")
@@ -144,8 +140,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Добавляем периодическую очистку альбомов (раз в час)
-    app.job_queue.run_repeating(cleanup_albums, interval=3600, first=10)
+    # УБРАЛИ JobQueue - теперь очистка старых альбомов происходит при каждом новом фото
 
     # Настройка webhook для Render
     port = int(os.environ.get("PORT", 8443))
