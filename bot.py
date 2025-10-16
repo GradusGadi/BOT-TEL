@@ -12,8 +12,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB_FILE = "photos.db"
 
-# Временное хранилище для альбомов
+# Временное хранилище для альбомов и пользователей
 temp_albums = {}
+user_photo_count = {}
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -39,7 +40,7 @@ def save_hash(img_hash):
     conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет лимит фотографий в альбомах и предупреждает пользователей"""
+    """Проверяет лимит фотографий в альбомах и по одному"""
     user = update.effective_user
     message = update.message
     
@@ -50,18 +51,49 @@ async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not message or not message.photo:
         return
     
-    # Проверяем только альбомы (группы фото)
-    if message.media_group_id:
-        album_id = message.media_group_id
+    current_time = time.time()
+    user_id = user.id
+    
+    # Очищаем старые данные пользователей (старше 10 секунд)
+    users_to_remove = []
+    for uid, data in list(user_photo_count.items()):
+        if current_time - data.get('timestamp', 0) > 10:  # 10 секунд
+            users_to_remove.append(uid)
+    for uid in users_to_remove:
+        del user_photo_count[uid]
+    
+    # Очищаем старые альбомы (старше 1 часа)
+    albums_to_remove = []
+    for aid, data in list(temp_albums.items()):
+        if current_time - data.get('timestamp', 0) > 3600:
+            albums_to_remove.append(aid)
+    for aid in albums_to_remove:
+        del temp_albums[aid]
+    
+    # Проверка отдельных фото (не альбом)
+    if not message.media_group_id:
+        if user_id not in user_photo_count:
+            user_photo_count[user_id] = {
+                'count': 1,
+                'timestamp': current_time,
+                'warning_sent': False,
+                'username': user.username or user.first_name
+            }
+        else:
+            user_photo_count[user_id]['count'] += 1
+            user_photo_count[user_id]['timestamp'] = current_time
         
-        # Очищаем старые альбомы (старше 1 часа) перед проверкой
-        current_time = time.time()
-        albums_to_remove = []
-        for aid, data in list(temp_albums.items()):
-            if current_time - data.get('timestamp', 0) > 3600:
-                albums_to_remove.append(aid)
-        for aid in albums_to_remove:
-            del temp_albums[aid]
+        # Если пользователь отправил больше 2 фото за 10 секунд
+        if (user_photo_count[user_id]['count'] > 2 and 
+            not user_photo_count[user_id]['warning_sent']):
+            
+            warning = "📸 Пожалуйста, не отправляйте много фото подряд! Ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, reply_to_message_id=message.message_id)
+            user_photo_count[user_id]['warning_sent'] = True
+    
+    # Проверка альбомов (групп фото)
+    else:
+        album_id = message.media_group_id
         
         if album_id not in temp_albums:
             temp_albums[album_id] = {
@@ -87,7 +119,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.message
 
-    # Сначала проверяем лимит фото в альбомах
+    # Сначала проверяем лимит фото
     await check_photos_limit(update, context)
     
     # Затем проверяем на дубликаты
