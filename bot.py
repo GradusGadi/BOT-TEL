@@ -39,7 +39,7 @@ def save_hash(img_hash):
     conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет лимит фотографий и предупреждает пользователей"""
+    """Проверяет лимит фотографий в альбомах и предупреждает пользователей"""
     user = update.effective_user
     message = update.message
     
@@ -50,14 +50,8 @@ async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not message or not message.photo:
         return
     
-    # Проверка одиночных фото (больше 2 в одном сообщении)
-    if not message.media_group_id:
-        if len(message.photo) > 2:
-            warning = "📸 Пожалуйста, не отправляйте больше 2 фотографий в одном сообщении. Ознакомьтесь с правилами в закреплённом сообщении."
-            await message.reply_text(warning, reply_to_message_id=message.message_id)
-    
-    # Проверка альбомов (групп фото)
-    else:
+    # Проверяем только альбомы (группы фото)
+    if message.media_group_id:
         album_id = message.media_group_id
         
         # Очищаем старые альбомы (старше 1 часа) перед проверкой
@@ -93,14 +87,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.message
 
-    # Сначала проверяем лимит фото
+    # Сначала проверяем лимит фото в альбомах
     await check_photos_limit(update, context)
     
-    # Затем проверяем на дубликаты (как раньше)
+    # Затем проверяем на дубликаты
     if user.id == ADMIN_USER_ID:
         return
 
-    # Защита от None (на случай ошибок)
+    # Защита от None
     if not message or not message.photo:
         return
 
@@ -139,8 +133,6 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-    # УБРАЛИ JobQueue - теперь очистка старых альбомов происходит при каждом новом фото
 
     # Настройка webhook для Render
     port = int(os.environ.get("PORT", 8443))
