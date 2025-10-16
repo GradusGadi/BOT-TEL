@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3
+import time
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from PIL import Image
@@ -10,6 +11,9 @@ import imagehash
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB_FILE = "photos.db"
+
+# Временное хранилище для альбомов
+temp_albums = {}
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -34,11 +38,61 @@ def save_hash(img_hash):
         pass
     conn.close()
 
+async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет лимит фотографий и предупреждает пользователей"""
+    user = update.effective_user
+    message = update.message
+    
+    # Админам можно всё
+    if user.id == ADMIN_USER_ID:
+        return
+        
+    if not message or not message.photo:
+        return
+    
+    # Проверка одиночных фото (больше 2 в одном сообщении)
+    if not message.media_group_id:
+        if len(message.photo) > 2:
+            warning = "📸 Пожалуйста, не отправляйте больше 2 фотографий в одном сообщении. Ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, reply_to_message_id=message.message_id)
+    
+    # Проверка альбомов (групп фото)
+    else:
+        album_id = message.media_group_id
+        
+        if album_id not in temp_albums:
+            temp_albums[album_id] = {
+                'count': 1,
+                'first_message_id': message.message_id,
+                'warning_sent': False,
+                'timestamp': time.time()
+            }
+        else:
+            temp_albums[album_id]['count'] += 1
+            
+        # Если в альбоме больше 2 фото и предупреждение ещё не отправлялось
+        if (temp_albums[album_id]['count'] > 2 and 
+            not temp_albums[album_id]['warning_sent']):
+            
+            warning = "📸 В альбоме больше 2 фотографий! Пожалуйста, ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, 
+                                   reply_to_message_id=temp_albums[album_id]['first_message_id'])
+            temp_albums[album_id]['warning_sent'] = True
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Основная функция обработки фото (проверка дубликатов + лимитов)"""
     user = update.effective_user
     message = update.message
 
+    # Сначала проверяем лимит фото
+    await check_photos_limit(update, context)
+    
+    # Затем проверяем на дубликаты (как раньше)
     if user.id == ADMIN_USER_ID:
+        return
+
+    # Защита от None (на случай ошибок)
+    if not message or not message.photo:
         return
 
     photo = message.photo[-1]
@@ -67,6 +121,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
 
+# Функция для очистки старых альбомов (опционально)
+async def cleanup_albums(context: ContextTypes.DEFAULT_TYPE):
+    """Очищает старые записи об альбомах"""
+    current_time = time.time()
+    albums_to_remove = []
+    
+    for album_id, data in temp_albums.items():
+        if current_time - data['timestamp'] > 3600:  # Удаляем старше 1 часа
+            albums_to_remove.append(album_id)
+    
+    for album_id in albums_to_remove:
+        del temp_albums[album_id]
+
 def main():
     if not TOKEN:
         raise RuntimeError("❌ Переменная BOT_TOKEN не задана! Добавь её в Environment Variables на Render.")
@@ -76,6 +143,9 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Добавляем периодическую очистку альбомов (раз в час)
+    app.job_queue.run_repeating(cleanup_albums, interval=3600, first=10)
 
     # Настройка webhook для Render
     port = int(os.environ.get("PORT", 8443))
@@ -87,7 +157,7 @@ def main():
             listen="0.0.0.0",
             port=port,
             webhook_url=webhook_url,
-            url_path="",  # Без секретного пути — безопасно на Render
+            url_path="",
         )
     else:
         logging.info("✅ Локальный режим (polling)")
