@@ -30,10 +30,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB_FILE = "photos.db"
 
-# Временное хранилище
-user_last_photos = {}
-last_warning_time = {}
-
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -66,37 +62,18 @@ def save_hash(img_hash):
         conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка лимита фото"""
+    """Проверка лимита фото в ОДНОМ сообщении"""
     user = update.effective_user
     message = update.message
     
     if user.id == ADMIN_USER_ID or not message or not message.photo:
         return
     
-    user_id = user.id
-    current_time = time.time()
-    
-    # Инициализируем или обновляем данные пользователя
-    if user_id not in user_last_photos:
-        user_last_photos[user_id] = []
-    
-    # Добавляем время отправки фото
-    user_last_photos[user_id].append(current_time)
-    
-    # Оставляем только фото за последние 10 секунд
-    user_last_photos[user_id] = [t for t in user_last_photos[user_id] if current_time - t <= 10]
-    
-    # Проверяем количество фото за последние 10 секунд
-    photo_count = len(user_last_photos[user_id])
-    
-    # Предупреждаем только если больше 2 фото И это 3-е или последующее фото
-    if photo_count >= 3 and user_last_photos[user_id][-1] == current_time:
-        # Проверяем, не отправляли ли уже предупреждение в последние 30 секунд
-        last_warn = last_warning_time.get(user_id, 0)
-        if current_time - last_warn > 30:
-            warning = "📸 Пожалуйста, не отправляйте больше 2 фото подряд! Ознакомьтесь с правилами в закреплённом сообщении."
-            await message.reply_text(warning, reply_to_message_id=message.message_id)
-            last_warning_time[user_id] = current_time
+    # ПРОСТАЯ ПРОВЕРКА: если в одном сообщении больше 2 фото - предупреждаем
+    if len(message.photo) > 2:
+        warning = "📸 Пожалуйста, не отправляйте больше 2 фото в одном сообщении! Ознакомьтесь с правилами в закреплённом сообщении."
+        await message.reply_text(warning, reply_to_message_id=message.message_id)
+        return
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Основная функция обработки фото"""
@@ -179,7 +156,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.info("✅ Бот запущен с диагностикой дубликатов")
+    logging.info("✅ Бот запущен с исправленным лимитом фото")
     
     try:
         app.run_polling()
