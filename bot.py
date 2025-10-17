@@ -1,12 +1,27 @@
-
 import logging
 import os
 import sqlite3
 import time
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from PIL import Image
 import imagehash
+
+# Простой веб-сервер для Render
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "✅ Bot is running!"
+
+def run_flask():
+    app_flask.run(host='0.0.0.0', port=5000)
+
+# Запускаем Flask в отдельном потоке
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
 
 # Получаем настройки из переменных окружения
 TOKEN = os.getenv("BOT_TOKEN")
@@ -16,8 +31,6 @@ DB_FILE = "photos.db"
 # Временное хранилище для альбомов и пользователей
 temp_albums = {}
 user_photo_count = {}
-# Добавляем блокировку для одновременных запросов
-processing_lock = False
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -44,90 +57,80 @@ def save_hash(img_hash):
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверяет лимит фотографий в альбомах и по одному"""
-    global processing_lock
+    user = update.effective_user
+    message = update.message
     
-    # Ждем если другой фото обрабатывается
-    while processing_lock:
-        await asyncio.sleep(0.1)
+    # Админам можно всё
+    if user.id == ADMIN_USER_ID:
+        return
+        
+    if not message or not message.photo:
+        return
     
-    processing_lock = True
-    try:
-        user = update.effective_user
-        message = update.message
-        
-        # Админам можно всё
-        if user.id == ADMIN_USER_ID:
-            return
-            
-        if not message or not message.photo:
-            return
-        
-        current_time = time.time()
-        user_id = user.id
-        
-        # Очищаем старые данные пользователей (старше 10 секунд)
-        users_to_remove = []
-        for uid, data in list(user_photo_count.items()):
-            if current_time - data.get('timestamp', 0) > 10:  # 10 секунд
-                users_to_remove.append(uid)
-        for uid in users_to_remove:
-            del user_photo_count[uid]
-        
-        # Очищаем старые альбомы (старше 1 часа)
-        albums_to_remove = []
-        for aid, data in list(temp_albums.items()):
-            if current_time - data.get('timestamp', 0) > 3600:
-                albums_to_remove.append(aid)
-        for aid in albums_to_remove:
-            del temp_albums[aid]
-        
-        # Проверка отдельных фото (не альбом)
-        if not message.media_group_id:
-            if user_id not in user_photo_count:
-                user_photo_count[user_id] = {
-                    'count': 1,
-                    'timestamp': current_time,
-                    'warning_sent': False,
-                    'username': user.username or user.first_name,
-                    'last_message_id': message.message_id
-                }
-            else:
-                user_photo_count[user_id]['count'] += 1
-                user_photo_count[user_id]['timestamp'] = current_time
-                user_photo_count[user_id]['last_message_id'] = message.message_id
-            
-            # Если пользователь отправил больше 2 фото за 10 секунд
-            if (user_photo_count[user_id]['count'] >= 3 and 
-                not user_photo_count[user_id]['warning_sent']):
-                
-                warning = "📸 Пожалуйста, не отправляйте больше 2 фото подряд! Ознакомьтесь с правилами в закреплённом сообщении."
-                await message.reply_text(warning, reply_to_message_id=user_photo_count[user_id]['last_message_id'])
-                user_photo_count[user_id]['warning_sent'] = True
-        
-        # Проверка альбомов (групп фото)
+    current_time = time.time()
+    user_id = user.id
+    
+    # Очищаем старые данные пользователей (старше 10 секунд)
+    users_to_remove = []
+    for uid, data in list(user_photo_count.items()):
+        if current_time - data.get('timestamp', 0) > 10:
+            users_to_remove.append(uid)
+    for uid in users_to_remove:
+        del user_photo_count[uid]
+    
+    # Очищаем старые альбомы (старше 1 часа)
+    albums_to_remove = []
+    for aid, data in list(temp_albums.items()):
+        if current_time - data.get('timestamp', 0) > 3600:
+            albums_to_remove.append(aid)
+    for aid in albums_to_remove:
+        del temp_albums[aid]
+    
+    # Проверка отдельных фото (не альбом)
+    if not message.media_group_id:
+        if user_id not in user_photo_count:
+            user_photo_count[user_id] = {
+                'count': 1,
+                'timestamp': current_time,
+                'warning_sent': False,
+                'username': user.username or user.first_name,
+                'last_message_id': message.message_id
+            }
         else:
-            album_id = message.media_group_id
+            user_photo_count[user_id]['count'] += 1
+            user_photo_count[user_id]['timestamp'] = current_time
+            user_photo_count[user_id]['last_message_id'] = message.message_id
+        
+        # Если пользователь отправил больше 2 фото за 10 секунд
+        if (user_photo_count[user_id]['count'] >= 3 and 
+            not user_photo_count[user_id]['warning_sent']):
             
-            if album_id not in temp_albums:
-                temp_albums[album_id] = {
-                    'count': 1,
-                    'first_message_id': message.message_id,
-                    'warning_sent': False,
-                    'timestamp': current_time
-                }
-            else:
-                temp_albums[album_id]['count'] += 1
-                
-            # Если в альбоме больше 2 фото и предупреждение ещё не отправлялось
-            if (temp_albums[album_id]['count'] > 2 and 
-                not temp_albums[album_id]['warning_sent']):
-                
-                warning = "📸 В альбоме больше 2 фотографий! Пожалуйста, ознакомьтесь с правилами в закреплённом сообщении."
-                await message.reply_text(warning, 
-                                       reply_to_message_id=temp_albums[album_id]['first_message_id'])
-                temp_albums[album_id]['warning_sent'] = True
-    finally:
-        processing_lock = False
+            warning = "📸 Пожалуйста, не отправляйте больше 2 фото подряд! Ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, reply_to_message_id=user_photo_count[user_id]['last_message_id'])
+            user_photo_count[user_id]['warning_sent'] = True
+    
+    # Проверка альбомов (групп фото)
+    else:
+        album_id = message.media_group_id
+        
+        if album_id not in temp_albums:
+            temp_albums[album_id] = {
+                'count': 1,
+                'first_message_id': message.message_id,
+                'warning_sent': False,
+                'timestamp': current_time
+            }
+        else:
+            temp_albums[album_id]['count'] += 1
+            
+        # Если в альбоме больше 2 фото и предупреждение ещё не отправлялось
+        if (temp_albums[album_id]['count'] > 2 and 
+            not temp_albums[album_id]['warning_sent']):
+            
+            warning = "📸 В альбоме больше 2 фотографий! Пожалуйста, ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, 
+                                   reply_to_message_id=temp_albums[album_id]['first_message_id'])
+            temp_albums[album_id]['warning_sent'] = True
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Основная функция обработки фото (проверка дубликатов + лимитов)"""
@@ -173,7 +176,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TOKEN:
-        raise RuntimeError("❌ Переменная BOT_TOKEN не задана! Добавь её в Environment Variables на Render.")
+        raise RuntimeError("❌ Переменная BOT_TOKEN не задана!")
 
     logging.basicConfig(level=logging.INFO)
     init_db()
@@ -181,8 +184,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # ВСЕГДА ИСПОЛЬЗУЕМ POLLING ДЛЯ RENDER
-    logging.info("✅ Запуск в режиме polling для Render")
+    logging.info("✅ Бот запущен с веб-сервером")
     app.run_polling()
 
 if __name__ == "__main__":
