@@ -166,21 +166,9 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Настройка webhook для Render
-    port = int(os.environ.get("PORT", 8443))
-    webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
-
-    if webhook_url:
-        logging.info(f"🚀 Запуск в режиме webhook: {webhook_url}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            webhook_url=webhook_url,
-            url_path="",
-        )
-    else:
-        logging.info("✅ Локальный режим (polling)")
-        app.run_polling()
+    # ВСЕГДА ИСПОЛЬЗУЕМ POLLING ДЛЯ RENDER
+    logging.info("✅ Запуск в режиме polling для Render")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
