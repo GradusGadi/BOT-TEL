@@ -30,6 +30,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB_FILE = "photos.db"
 
+# Для отслеживания альбомов
+album_photo_count = {}
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -62,18 +65,30 @@ def save_hash(img_hash):
         conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка лимита фото в ОДНОМ сообщении"""
+    """Проверка лимита фото в АЛЬБОМАХ"""
     user = update.effective_user
     message = update.message
     
     if user.id == ADMIN_USER_ID or not message or not message.photo:
         return
     
-    # ПРОСТАЯ ПРОВЕРКА: если в одном сообщении больше 2 фото - предупреждаем
-    if len(message.photo) > 2:
-        warning = "📸 Пожалуйста, не отправляйте больше 2 фото в одном сообщении! Ознакомьтесь с правилами в закреплённом сообщении."
-        await message.reply_text(warning, reply_to_message_id=message.message_id)
-        return
+    # Проверяем только АЛЬБОМЫ (группы фото)
+    if message.media_group_id:
+        album_id = message.media_group_id
+        
+        # Увеличиваем счетчик фото в альбоме
+        if album_id not in album_photo_count:
+            album_photo_count[album_id] = 1
+        else:
+            album_photo_count[album_id] += 1
+        
+        # Если в альбоме больше 2 фото - предупреждаем
+        if album_photo_count[album_id] > 2:
+            warning = "📸 Пожалуйста, не отправляйте больше 2 фото в одном сообщении! Ознакомьтесь с правилами в закреплённом сообщении."
+            await message.reply_text(warning, reply_to_message_id=message.message_id)
+            
+            # Очищаем счетчик для этого альбома
+            album_photo_count[album_id] = -100  # Чтобы не спамить
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Основная функция обработки фото"""
@@ -156,7 +171,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.info("✅ Бот запущен с исправленным лимитом фото")
+    logging.info("✅ Бот запущен - проверяет только альбомы и дубликаты")
     
     try:
         app.run_polling()
