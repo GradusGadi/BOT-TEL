@@ -1,4 +1,3 @@
-
 import logging
 import os
 import sqlite3
@@ -41,12 +40,15 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS hashes (hash TEXT PRIMARY KEY)")
     conn.commit()
     conn.close()
+    logging.info("✅ База данных инициализирована")
 
 def hash_exists(img_hash):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM hashes WHERE hash = ?", (img_hash,))
-    return cursor.fetchone() is not None
+    result = cursor.fetchone() is not None
+    conn.close()
+    return result
 
 def save_hash(img_hash):
     conn = sqlite3.connect(DB_FILE)
@@ -54,9 +56,14 @@ def save_hash(img_hash):
     try:
         cursor.execute("INSERT INTO hashes (hash) VALUES (?)", (img_hash,))
         conn.commit()
+        logging.info(f"💾 Хеш сохранен в БД: {img_hash}")
     except sqlite3.IntegrityError:
+        logging.info(f"⚠️ Хеш уже существует: {img_hash}")
         pass
-    conn.close()
+    except Exception as e:
+        logging.error(f"❌ Ошибка сохранения хеша: {e}")
+    finally:
+        conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверка лимита фото"""
@@ -101,6 +108,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Затем проверяем на дубликаты
     if user.id == ADMIN_USER_ID:
+        logging.info("👑 Сообщение от админа - пропускаем")
         return
 
     if not message or not message.photo:
@@ -114,17 +122,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         image = Image.open(file_path)
         img_hash = str(imagehash.average_hash(image))
+        
+        logging.info(f"🔍 Обработка фото, хеш: {img_hash}")
 
-        if hash_exists(img_hash):
+        # ДИАГНОСТИКА: Проверяем что возвращает hash_exists
+        exists = hash_exists(img_hash)
+        logging.info(f"📊 Хеш {img_hash} существует в БД: {exists}")
+
+        if exists:
             mention = f"@{user.username}" if user.username else f"[{user.first_name}](tg://user?id={user.id})"
+            logging.info(f"🚨 Найден дубликат! Удаляю сообщение от {mention}")
+            
             await update.effective_chat.send_message(
                 text=f"⚠️ {mention}, это фото уже было отправлено ранее!",
                 reply_to_message_id=message.message_id,
                 parse_mode="Markdown"
             )
             await message.delete()
+            logging.info("✅ Дубликат удален")
         else:
             save_hash(img_hash)
+            logging.info(f"💾 Сохранен новый хеш: {img_hash}")
 
     except Exception as e:
         logging.error(f"Ошибка обработки фото: {e}")
@@ -140,7 +158,11 @@ def main():
     if not TOKEN:
         raise RuntimeError("❌ Переменная BOT_TOKEN не задана!")
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
     init_db()
 
     app = Application.builder().token(TOKEN).build()
@@ -157,7 +179,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.info("✅ Бот запущен с обработчиком ошибок")
+    logging.info("✅ Бот запущен с диагностикой дубликатов")
     
     try:
         app.run_polling()
