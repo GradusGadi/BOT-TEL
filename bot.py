@@ -56,7 +56,7 @@ def save_hash(img_hash):
     conn.close()
 
 async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Упрощенная проверка лимита фото"""
+    """Проверка лимита фото"""
     user = update.effective_user
     message = update.message
     
@@ -77,11 +77,14 @@ async def check_photos_limit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_last_photos[user_id] = [t for t in user_last_photos[user_id] if current_time - t <= 10]
     
     # Проверяем количество фото за последние 10 секунд
-    if len(user_last_photos[user_id]) >= 3:
+    photo_count = len(user_last_photos[user_id])
+    
+    # Предупреждаем только если больше 2 фото И это 3-е или последующее фото
+    if photo_count >= 3 and user_last_photos[user_id][-1] == current_time:
         # Проверяем, не отправляли ли уже предупреждение в последние 30 секунд
         last_warn = last_warning_time.get(user_id, 0)
         if current_time - last_warn > 30:
-            warning = "📸 Пожалуйста, не отправляйте больше 2 фото за 10 секунд! Ознакомьтесь с правилами в закреплённом сообщении."
+            warning = "📸 Пожалуйста, не отправляйте больше 2 фото подряд! Ознакомьтесь с правилами в закреплённом сообщении."
             await message.reply_text(warning, reply_to_message_id=message.message_id)
             last_warning_time[user_id] = current_time
 
@@ -136,7 +139,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    logging.info("✅ Бот запущен с упрощенной логикой лимитов")
+    logging.info("✅ Бот запущен с исправленной логикой лимитов")
     app.run_polling()
 
 if __name__ == "__main__":
