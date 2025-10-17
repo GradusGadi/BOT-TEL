@@ -1,8 +1,11 @@
+
 import logging
 import os
 import sqlite3
 import time
 import threading
+import signal
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -129,6 +132,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logging.error(f"Ошибка: {context.error}")
+
 def main():
     if not TOKEN:
         raise RuntimeError("❌ Переменная BOT_TOKEN не задана!")
@@ -138,9 +145,25 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_error_handler(error_handler)
 
-    logging.info("✅ Бот запущен с исправленной логикой лимитов")
-    app.run_polling()
+    # Graceful shutdown для Render
+    def signal_handler(signum, frame):
+        logging.info("🚪 Получен сигнал завершения...")
+        app.stop()
+        logging.info("✅ Бот корректно завершил работу")
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    logging.info("✅ Бот запущен с обработчиком ошибок")
+    
+    try:
+        app.run_polling()
+    except Exception as e:
+        logging.error(f"Критическая ошибка: {e}")
+        os._exit(1)
 
 if __name__ == "__main__":
     main()
