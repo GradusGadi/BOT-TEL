@@ -56,22 +56,19 @@ async def check_duplicate_photo(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     
     try:
-        # Пробуем получить оригинальное сообщение
         original_message = await context.bot.get_message(
             chat_id=update.effective_chat.id,
             message_id=original_message_id
         )
-        # Если сообщение существует - это дубликат
         if original_message:
             mention = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
             await update.message.reply_text(
-                f"⚠️ {mention}, это фото уже было отправлено ранее!",
+                f"⚠️ {mention}, это фото уже было отправено ранее!",
                 reply_to_message_id=update.message.message_id
             )
             await update.message.delete()
             return True
     except Exception:
-        # Оригинал удален - пропускаем фото
         pass
     
     return False
@@ -81,11 +78,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.message
 
-    # Игнорируем админа
     if user.id == ADMIN_USER_ID:
         return
 
-    # Проверяем лимит фото в сообщении
     if len(message.photo) > 2:
         await message.reply_text(
             "📸 Пожалуйста, не отправляйте больше 2 фото в одном сообщении!",
@@ -93,47 +88,52 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Обрабатываем каждое фото в сообщении
     for photo in message.photo:
-        # Скачиваем фото
         file = await context.bot.get_file(photo.file_id)
         file_path = f"temp_{photo.file_id}.jpg"
         await file.download_to_drive(file_path)
 
         try:
-            # Создаем хеш фото
             image = Image.open(file_path)
             img_hash = str(imagehash.average_hash(image))
 
-            # Проверяем дубликат
             is_duplicate = await check_duplicate_photo(update, context, img_hash)
             if not is_duplicate:
-                # Сохраняем хеш нового фото
                 save_photo_hash(img_hash, message.message_id)
 
         except Exception as e:
             logging.error(f"Ошибка обработки фото: {e}")
         finally:
-            # Удаляем временный файл
             if os.path.exists(file_path):
                 os.remove(file_path)
 
 def main():
-    # Настройка логирования
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=logging.INFO
     )
 
-    # Инициализация БД
     init_db()
 
-    # Создание и запуск бота
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    logging.info("Бот запущен")
-    app.run_polling()
+
+    # Получаем порт и внешний URL от Render
+    PORT = int(os.environ.get("PORT", 8443))
+    RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render автоматически задаёт эту переменную
+
+    if not RENDER_EXTERNAL_URL:
+        raise ValueError("Переменная окружения RENDER_EXTERNAL_URL не установлена!")
+
+    WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}/{TOKEN}"
+
+    logging.info(f"Устанавливаю webhook на: {WEBHOOK_URL}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,  # путь, по которому Telegram будет отправлять обновления
+        webhook_url=WEBHOOK_URL
+    )
 
 if __name__ == "__main__":
     main()
