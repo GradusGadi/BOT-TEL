@@ -4,26 +4,23 @@ import logging
 import time
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, TARGET_CHAT_ID, QUEUE_FILE, STATE_FILE
 
 # === Настройка ===
 logging.basicConfig(level=logging.INFO)
 application = Application.builder().token(BOT_TOKEN).build()
-scheduler = AsyncIOScheduler()
 
 # Буфер для альбомов
 album_buffer = defaultdict(list)
 ALBUM_TIMEOUT = 3.0
-album_processing = set()
 
 # Глобальные переменные
 SEND_INTERVAL = 30 * 60  # 30 минут
 is_sending = False
+send_task = None
 
 # === Вспомогательные функции ===
 def load_queue():
@@ -94,17 +91,14 @@ def get_control_keyboard():
     keyboard = [
         [InlineKeyboardButton(status, callback_data=callback)],
         [InlineKeyboardButton("🚀 Опубликовать сейчас", callback_data="publish_now")],
-        [InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
-        [InlineKeyboardButton("🔍 Проверить альбомы", callback_data="check_albums")]
+        [InlineKeyboardButton("🔄 Обновить", callback_data="refresh")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_status_text():
     count = len(load_queue())
     status = "⏸ на паузе" if is_paused() else "▶️ работает"
-    albums_count = len(album_buffer) + len(album_processing)
-    album_info = f"\n📦 Альбомы в обработке: {albums_count}" if albums_count > 0 else ""
-    return f"📸 В очереди: {count} фото\nСтатус: {status}{album_info}\n{get_time_until_next_send()}"
+    return f"📸 В очереди: {count} фото\nСтатус: {status}\n{get_time_until_next_send()}"
 
 # === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,39 +133,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Альбом
         logging.info(f"📦 Получено фото из альбома {media_group_id}")
-        album_buffer[media_group_id].append((update.message.id, file_id))
+        album_buffer[media_group_id].append((update.message.message_id, file_id))
         
         if len(album_buffer[media_group_id]) == 1:
-            album_processing.add(media_group_id)
-            
             async def process_album():
-                try:
-                    await asyncio.sleep(ALBUM_TIMEOUT)
+                await asyncio.sleep(ALBUM_TIMEOUT)
+                
+                if media_group_id in album_buffer:
+                    photos = sorted(album_buffer[media_group_id], key=lambda x: x[0])
+                    new_ids = [fid for _, fid in photos]
                     
-                    if media_group_id in album_buffer:
-                        photos = sorted(album_buffer[media_group_id], key=lambda x: x[0])
-                        new_ids = [fid for _, fid in photos]
-                        
-                        queue = load_queue()
-                        start_pos = len(queue) + 1
-                        queue.extend(new_ids)
-                        save_queue(queue)
-                        count = len(queue)
-                        
-                        logging.info(f"✅ Альбом {media_group_id} обработан: {len(new_ids)} фото. Позиции: {start_pos}-{count}")
-                        
-                        del album_buffer[media_group_id]
-                        album_processing.discard(media_group_id)
-                        
-                        await update.message.reply_text(
-                            f"📦 Альбом из {len(new_ids)} фото добавлен!\n"
-                            f"📍 Позиции: #{start_pos}-#{count}",
-                            reply_markup=get_control_keyboard()
-                        )
-                            
-                except Exception as e:
-                    logging.error(f"❌ Ошибка обработки альбома {media_group_id}: {e}")
-                    album_processing.discard(media_group_id)
+                    queue = load_queue()
+                    start_pos = len(queue) + 1
+                    queue.extend(new_ids)
+                    save_queue(queue)
+                    count = len(queue)
+                    
+                    logging.info(f"✅ Альбом обработан: {len(new_ids)} фото. Позиции: {start_pos}-{count}")
+                    del album_buffer[media_group_id]
+                    
+                    await update.message.reply_text(
+                        f"📦 Альбом из {len(new_ids)} фото добавлен!\n📍 Позиции: #{start_pos}-#{count}",
+                        reply_markup=get_control_keyboard()
+                    )
             
             asyncio.create_task(process_album())
 
@@ -187,24 +171,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "pause":
         set_paused(True)
-        scheduler.remove_all_jobs()
+        global send_task
+        if send_task:
+            send_task.cancel()
         await query.edit_message_text(get_status_text(), reply_markup=get_control_keyboard())
         
     elif action == "resume":
         set_paused(False)
         set_next_send_time()
-        scheduler.remove_all_jobs()
-        
-        # Сразу отправляем первое фото
-        asyncio.create_task(send_next_photo())
-        
-        # Потом — каждые 30 минут
-        scheduler.add_job(
-            send_next_photo,
-            'interval',
-            minutes=30,
-            id='half_hour_send'
-        )
+        # Запускаем отправку
+        send_task = asyncio.create_task(send_scheduler())
         await query.edit_message_text(get_status_text(), reply_markup=get_control_keyboard())
         
     elif action == "publish_now":
@@ -221,13 +197,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ Отправлено!" if success else "❌ Ошибка", show_alert=True)
         await query.edit_message_text(get_status_text(), reply_markup=get_control_keyboard())
         
-    elif action == "check_albums":
-        active_albums = len(album_buffer) + len(album_processing)
-        if active_albums > 0:
-            await query.answer(f"📦 Обрабатывается альбомов: {active_albums}")
-        else:
-            await query.answer("✅ Нет альбомов в обработке")
-            
     elif action == "refresh":
         await query.edit_message_text(get_status_text(), reply_markup=get_control_keyboard())
 
@@ -264,7 +233,6 @@ async def send_next_photo():
         return
     
     if not should_send_now():
-        logging.info(f"⏳ Ещё не время для отправки. Ждём...")
         return
     
     queue = load_queue()
@@ -290,6 +258,13 @@ async def send_next_photo():
     finally:
         is_sending = False
 
+# === Планировщик отправки ===
+async def send_scheduler():
+    """Отправляет фото каждые 30 минут"""
+    while not is_paused():
+        await send_next_photo()
+        await asyncio.sleep(SEND_INTERVAL)
+
 # === Запуск ===
 async def main():
     logging.info("🤖 Запуск бота...")
@@ -299,27 +274,12 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Настраиваем планировщик
-    scheduler.remove_all_jobs()
-    
+    # Запускаем планировщик если не на паузе
     if not is_paused():
-        if get_next_send_time() == 0:
-            set_next_send_time()
-        
-        # Сразу отправляем первое фото при запуске
-        asyncio.create_task(send_next_photo())
-        
-        # Потом — каждые 30 минут
-        scheduler.add_job(
-            send_next_photo,
-            'interval',
-            minutes=30,
-            id='half_hour_send'
-        )
-        logging.info("✅ Планировщик запущен: первое фото сразу, потом каждые 30 мин")
+        global send_task
+        send_task = asyncio.create_task(send_scheduler())
+        logging.info("✅ Планировщик запущен")
 
-    scheduler.start()
-    
     # Запускаем бота
     await application.run_polling()
 
