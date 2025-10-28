@@ -55,6 +55,10 @@ def get_photo_message_id(img_hash: str) -> int:
     return result[0] if result else None
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ДОБАВЛЕНО: Проверка на None
+    if update.message is None:
+        return
+        
     user = update.effective_user
     message = update.message
 
@@ -86,6 +90,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         # Фото НЕ удаляются — только предупреждение
     else:
+        # ДОБАВЛЕНО: Проверка наличия фото
+        if not message.photo:
+            return
+            
         # Проверка на дубликат
         photo = message.photo[-1]
         file_path = f"temp_{photo.file_id}.jpg"
