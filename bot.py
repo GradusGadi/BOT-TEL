@@ -12,9 +12,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 DB_FILE = "bot.db"
 
-URL_REGEX = re.compile(r"(https?://|www\.|t\.me/)", re.IGNORECASE)
-OBFUSCATED_REGEX = re.compile(r"(h\s*t\s*t\s*p|hxxp|w\s*w\s*w|t\s*\.\s*me|dot)", re.IGNORECASE)
-
 # === DB ===
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -41,14 +38,69 @@ def log_ban(user_id, username, reason):
     conn.commit()
     conn.close()
 
-# === normalize ===
-def normalize_text(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"\s+", "", text)
-    text = text.replace("(dot)", ".").replace("[dot]", ".").replace("{dot}", ".")
-    return text
+# === ПРОВЕРКА ССЫЛОК ===
+def has_link(message):
+    text = message.text or message.caption or ""
 
-# === moderation ===
+    entities = []
+    if message.entities:
+        entities.extend(message.entities)
+    if message.caption_entities:
+        entities.extend(message.caption_entities)
+
+    for entity in entities:
+
+        # === скрытые ссылки ===
+        if entity.type == "text_link":
+            url = entity.url.lower()
+
+            if "t.me/+" in url or "joinchat" in url:
+                return True
+
+            if not ("t.me/" in url):
+                return True
+
+        # === обычные ссылки ===
+        if entity.type == "url":
+            url = text[entity.offset: entity.offset + entity.length].lower()
+
+            if "t.me/+" in url or "joinchat" in url:
+                return True
+
+            if not ("t.me/" in url):
+                return True
+
+        # === /start@bot ===
+        if entity.type == "bot_command" and "@" in text:
+            return True
+
+    # === regex fallback ===
+
+    # инвайты
+    if re.search(r"t\.me/\+", text, re.IGNORECASE):
+        return True
+
+    if re.search(r"joinchat", text, re.IGNORECASE):
+        return True
+
+    # внешние ссылки
+    if re.search(r"https?://", text, re.IGNORECASE):
+        if not re.search(r"https?://t\.me/[a-zA-Z0-9_]+/?$", text):
+            return True
+
+    if re.search(r"www\.", text, re.IGNORECASE):
+        return True
+
+    # обходы
+    normalized = re.sub(r"\s+", "", text.lower())
+    normalized = normalized.replace("(dot)", ".")
+
+    if "http" in normalized and "t.me/" not in normalized:
+        return True
+
+    return False
+
+# === МОДЕРАЦИЯ ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         return
@@ -56,13 +108,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = update.effective_user
 
-    # ⚠️ ТОЛЬКО В ГРУППАХ
+    # только группы
     if message.chat.type == "private":
         return
 
+    # игнор админа
     if user.id == ADMIN_USER_ID:
         return
 
+    # игнор админов чата
     try:
         member = await context.bot.get_chat_member(message.chat_id, user.id)
         if member.status in ["administrator", "creator"]:
@@ -70,24 +124,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    text = message.text or message.caption or ""
-    has_link = False
-
-    if message.entities:
-        for entity in message.entities:
-            if entity.type in ["url", "text_link"]:
-                has_link = True
-                break
-
-    if not has_link and URL_REGEX.search(text):
-        has_link = True
-
-    if not has_link:
-        normalized = normalize_text(text)
-        if URL_REGEX.search(normalized) or OBFUSCATED_REGEX.search(text):
-            has_link = True
-
-    if has_link:
+    if has_link(message):
         username = user.username or user.first_name
 
         try:
@@ -105,7 +142,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log_ban(user.id, username, "link")
 
-# === ADMIN PANEL ===
+# === ПАНЕЛЬ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
@@ -113,7 +150,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Нет доступа")
         return
 
     keyboard = [
@@ -126,7 +162,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# === buttons ===
+# === КНОПКИ ===
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -162,7 +198,6 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    # 🔥 ВАЖНО: порядок
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
